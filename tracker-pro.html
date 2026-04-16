@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>MiFit Pro + Mapa & Historial</title>
+    <title>MiFit Pro + Anti-Suspensión</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -11,77 +11,89 @@
     <style>
         :root { --bg: #0d0d0d; --card: #1a1a1a; --accent: #00ffa3; --text: #fff; --danger: #ff4757; }
         body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 15px; display: flex; flex-direction: column; align-items: center; }
-        
         .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; width: 100%; max-width: 450px; }
         .card { background: var(--card); padding: 12px; border-radius: 15px; text-align: center; border: 1px solid #222; }
         .full { grid-column: span 2; }
         .val { font-size: 1.6rem; font-weight: bold; color: var(--accent); display: block; }
         .label { font-size: 0.65rem; color: #888; text-transform: uppercase; letter-spacing: 1px; }
-
         #map { width: 100%; height: 200px; border-radius: 15px; margin: 15px 0; border: 1px solid #333; z-index: 1; }
-
         .controls { width: 100%; max-width: 450px; display: flex; flex-direction: column; gap: 10px; }
-        button { padding: 16px; border-radius: 12px; border: none; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
+        button { padding: 16px; border-radius: 12px; border: none; font-weight: bold; font-size: 1rem; cursor: pointer; }
         #btn { background: var(--accent); color: #000; }
         #btn.stop { background: var(--danger); color: #fff; }
-
-        /* Historial Mejorado */
         .history { width: 100%; max-width: 450px; margin-top: 25px; background: #111; border-radius: 15px; padding: 15px; box-sizing: border-box; }
-        .history h3 { font-size: 0.9rem; color: #555; margin: 0 0 10px 0; border-bottom: 1px solid #222; padding-bottom: 5px; }
         .hist-list { list-style: none; padding: 0; margin: 0; max-height: 200px; overflow-y: auto; }
         .hist-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #1a1a1a; font-size: 0.8rem; }
-        .hist-date { color: var(--accent); font-weight: bold; width: 80px; }
-        .hist-data { text-align: right; color: #bbb; line-height: 1.4; }
+        .wake-status { font-size: 0.6rem; color: var(--accent); margin-top: 5px; }
     </style>
 </head>
 <body>
 
-    <h2 style="font-weight: 200; margin: 10px 0;">Mi Tracker Personal</h2>
+    <h2 style="font-weight: 200; margin: 10px 0;">Mi Tracker Pro</h2>
 
     <div class="grid">
         <div class="card"><span class="label">Pasos</span><span class="val" id="steps">0</span></div>
         <div class="card"><span class="label">Altitud</span><span class="val" id="alt">--</span></div>
         <div class="card"><span class="label">Velocidad</span><span class="val" id="speed">0.0</span><span class="label">km/h</span></div>
         <div class="card"><span class="label">Calorías</span><span class="val" id="kcal">0</span></div>
-        <div class="card full"><span class="label">Distancia Recorrida</span><span class="val" id="dist">0.00 km</span></div>
+        <div class="card full"><span class="label">Distancia</span><span class="val" id="dist">0.00 km</span></div>
     </div>
 
     <div id="map"></div>
 
     <div class="controls">
         <button id="btn" onclick="toggle()">INICIAR ACTIVIDAD</button>
+        <div id="wakeStatus" class="wake-status" style="text-align: center; visibility: hidden;">⚓ Manteniendo sensores activos...</div>
     </div>
 
     <div class="history">
-        <h3>HISTORIAL DE ACTIVIDAD</h3>
         <ul id="histList" class="hist-list"></ul>
-        <button onclick="exportarCSV()" style="background:none; color:#444; font-size:0.7rem; text-decoration:underline; width:auto; padding:5px;">Descargar CSV</button>
     </div>
 
     <script>
-        let activo = false, pasos = 0, distancia = 0, kcal = 0, watchID, map, path, sensorPasos, lastAlt = null;
+        let activo = false, pasos = 0, distancia = 0, kcal = 0, watchID, map, path, sensorPasos, wakeLock = null;
         let coordsRuta = [];
 
-        window.onload = () => {
-            initMap();
-            mostrarHistorial();
-        };
+        window.onload = () => { initMap(); mostrarHistorial(); };
 
         function initMap() {
-            map = L.map('map').setView([40.4167, -3.7037], 13); // Centrado inicial genérico
+            map = L.map('map').setView([40.4167, -3.7037], 13);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
             path = L.polyline([], {color: '#00ffa3', weight: 4}).addTo(map);
         }
 
-        function toggle() {
+        // FUNCIÓN CLAVE: Bloqueo de suspensión
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    document.getElementById('wakeStatus').style.visibility = 'visible';
+                }
+            } catch (err) {
+                console.log(`Error WakeLock: ${err.name}, ${err.message}`);
+            }
+        }
+
+        function releaseWakeLock() {
+            if (wakeLock !== null) {
+                wakeLock.release().then(() => {
+                    wakeLock = null;
+                    document.getElementById('wakeStatus').style.visibility = 'hidden';
+                });
+            }
+        }
+
+        async function toggle() {
             const btn = document.getElementById('btn');
             if (!activo) {
                 activo = true;
                 btn.innerText = "FINALIZAR Y GUARDAR";
                 btn.classList.add('stop');
+                await requestWakeLock(); // Activar bloqueo al empezar
                 startTracking();
             } else {
                 detenerYGuardar();
+                releaseWakeLock(); // Liberar bloqueo al terminar
                 btn.innerText = "INICIAR ACTIVIDAD";
                 btn.classList.remove('stop');
             }
@@ -91,35 +103,22 @@
             pasos = 0; distancia = 0; kcal = 0; coordsRuta = [];
             path.setLatLngs([]);
             
-            // 1. GPS y Altitud
             if (navigator.geolocation) {
                 watchID = navigator.geolocation.watchPosition(pos => {
                     const { latitude, longitude, speed, altitude } = pos.coords;
                     const latlng = [latitude, longitude];
-                    
                     coordsRuta.push(latlng);
                     path.setLatLngs(coordsRuta);
                     map.setView(latlng, 17);
-
                     document.getElementById('speed').innerText = (speed * 3.6 || 0).toFixed(1);
-                    
-                    if (altitude !== null) {
-                        document.getElementById('alt').innerText = Math.round(altitude) + "m";
-                        // Incremento de calorías si hay pendiente
-                        let factor = (lastAlt && altitude > lastAlt) ? 1.5 : 1.0;
-                        kcal += (0.01 * factor); // Cálculo por tiempo/movimiento
-                        document.getElementById('kcal').innerText = Math.floor(kcal);
-                        lastAlt = altitude;
-                    }
-                    
+                    if (altitude !== null) document.getElementById('alt').innerText = Math.round(altitude) + "m";
                     if(coordsRuta.length > 1) {
-                        distancia += 0.01; // Simulación de distancia (el GPS real sumaría tramos)
+                        distancia += 0.005; // Ajuste de distancia simulada
                         document.getElementById('dist').innerText = distancia.toFixed(2) + " km";
                     }
                 }, null, { enableHighAccuracy: true });
             }
 
-            // 2. Sensor de Pasos (Acelerómetro)
             if ('LinearAccelerationSensor' in window) {
                 sensorPasos = new LinearAccelerationSensor({ frequency: 60 });
                 let lastM = 0;
@@ -128,7 +127,7 @@
                     if (m > 12 && lastM < 12) {
                         pasos++;
                         document.getElementById('steps').innerText = pasos;
-                        kcal += 0.04; // 0.04 kcal por paso
+                        kcal += 0.04;
                         document.getElementById('kcal').innerText = Math.floor(kcal);
                     }
                     lastM = m;
@@ -141,19 +140,15 @@
             activo = false;
             if(watchID) navigator.geolocation.clearWatch(watchID);
             if(sensorPasos) sensorPasos.stop();
-
-            // Guardar en LocalStorage
             const registro = {
                 fecha: new Date().toLocaleDateString() + " " + new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
                 pasos: pasos,
                 dist: document.getElementById('dist').innerText,
                 kcal: document.getElementById('kcal').innerText
             };
-
             let historial = JSON.parse(localStorage.getItem('fit_hist')) || [];
             historial.unshift(registro);
             localStorage.setItem('fit_hist', JSON.stringify(historial.slice(0, 30)));
-            
             mostrarHistorial();
         }
 
@@ -162,22 +157,10 @@
             const historial = JSON.parse(localStorage.getItem('fit_hist')) || [];
             lista.innerHTML = historial.map(h => `
                 <li class="hist-item">
-                    <span class="hist-date">${h.fecha}</span>
-                    <span class="hist-data">
-                        ${h.pasos} pasos | ${h.dist}<br>
-                        <strong>${h.kcal} Kcal</strong>
-                    </span>
+                    <span><strong>${h.fecha}</strong></span>
+                    <span>${h.pasos} pasos | ${h.kcal} kcal</span>
                 </li>
             `).join('');
-        }
-
-        function exportarCSV() {
-            let hist = JSON.parse(localStorage.getItem('fit_hist')) || [];
-            let csv = "Fecha,Pasos,Distancia,Calorias\n" + hist.map(h => `${h.fecha},${h.pasos},${h.dist},${h.kcal}`).join("\n");
-            let blob = new Blob([csv], { type: 'text/csv' });
-            let url = window.URL.createObjectURL(blob);
-            let a = document.createElement('a');
-            a.href = url; a.download = 'mi_actividad.csv'; a.click();
         }
     </script>
 </body>
