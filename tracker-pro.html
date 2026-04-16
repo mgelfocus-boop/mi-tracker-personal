@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>MiFit Pro + GPS Filtrado</title>
+    <title>MiFit Pro + Afinación Real</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -25,7 +25,7 @@
         .hist-list { list-style: none; padding: 0; margin: 0; max-height: 200px; overflow-y: auto; }
         .hist-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #1a1a1a; font-size: 0.8rem; }
         .wake-status { font-size: 0.6rem; color: var(--accent); margin-top: 5px; }
-        #gps-status { font-size: 0.7rem; color: #ff9f43; margin-top: 5px; display: none; }
+        #sys-status { font-size: 0.7rem; color: #ff9f43; margin-top: 5px; display: none; text-align: center; }
     </style>
 </head>
 <body>
@@ -44,8 +44,8 @@
 
     <div class="controls">
         <button id="btn" onclick="toggle()">INICIAR ACTIVIDAD</button>
-        <div id="gps-status">Buscando señal GPS de alta precisión...</div>
-        <div id="wakeStatus" class="wake-status" style="visibility: hidden;">⚓ Pantalla activa bloqueada</div>
+        <div id="sys-status">Buscando señal GPS...</div>
+        <div id="wakeStatus" class="wake-status" style="visibility: hidden; text-align:center;">⚓ Pantalla activa bloqueada</div>
     </div>
 
     <div class="history">
@@ -69,9 +69,7 @@
             const R = 6371; 
             const dLat = (lat2 - lat1) * Math.PI / 180;
             const dLon = (lon2 - lon1) * Math.PI / 180;
-            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
             return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
         }
 
@@ -81,7 +79,7 @@
                     wakeLock = await navigator.wakeLock.request('screen');
                     document.getElementById('wakeStatus').style.visibility = 'visible';
                 }
-            } catch (err) { console.log("WakeLock error"); }
+            } catch (err) { console.log("WakeLock no soportado."); }
         }
 
         function releaseWakeLock() {
@@ -95,11 +93,13 @@
 
         async function toggle() {
             const btn = document.getElementById('btn');
+            const status = document.getElementById('sys-status');
             if (!activo) {
                 activo = true;
                 btn.innerText = "FINALIZAR Y GUARDAR";
                 btn.classList.add('stop');
-                document.getElementById('gps-status').style.display = 'block';
+                status.style.display = 'block';
+                status.innerText = "Buscando señal GPS...";
                 await requestWakeLock();
                 startTracking();
             } else {
@@ -107,14 +107,17 @@
                 releaseWakeLock();
                 btn.innerText = "INICIAR ACTIVIDAD";
                 btn.classList.remove('stop');
-                document.getElementById('gps-status').style.display = 'none';
+                status.style.display = 'none';
             }
         }
 
         function startTracking() {
             pasos = 0; distancia = 0; kcal = 0; coordsRuta = []; primerPuntoFijado = false;
             path.setLatLngs([]);
+            document.getElementById('steps').innerText = "0";
+            document.getElementById('dist').innerText = "0.00 km";
             
+            // --- INICIO GPS ---
             if (navigator.geolocation) {
                 watchID = navigator.geolocation.watchPosition(pos => {
                     const { latitude, longitude, speed, altitude, accuracy } = pos.coords;
@@ -123,24 +126,20 @@
                     document.getElementById('speed').innerText = (speed * 3.6 || 0).toFixed(1);
                     if (altitude !== null) document.getElementById('alt').innerText = Math.round(altitude) + "m";
 
-                    // FILTRO DE GPS ESTRICTO: Ignora cualquier lectura con un error mayor a 20 metros
-                    if (accuracy < 20) {
-                        
-                        // Si es la primera lectura buena, la fijamos y quitamos el mensaje de "Buscando..."
+                    if (accuracy < 40) {
                         if (!primerPuntoFijado) {
                             primerPuntoFijado = true;
                             coordsRuta.push(latlng);
                             path.setLatLngs(coordsRuta);
                             map.setView(latlng, 17);
-                            document.getElementById('gps-status').style.display = 'none';
+                            document.getElementById('sys-status').style.display = 'none';
                             return; 
                         }
 
-                        // Cálculo real entre puntos
                         let ultimaPos = coordsRuta[coordsRuta.length - 1];
                         let tramoKm = calcularDistancia(ultimaPos[0], ultimaPos[1], latitude, longitude);
                         
-                        // FILTRO DE MOVIMIENTO: Más de 3 metros (evita vibraciones) y menos de 100 metros por lectura (evita teletransportes)
+                        // Filtro estricto: Bloquea fallos de GPS mayores a 100 metros por lectura
                         if (tramoKm > 0.003 && tramoKm < 0.100) {
                             distancia += tramoKm;
                             document.getElementById('dist').innerText = distancia.toFixed(2) + " km";
@@ -149,24 +148,36 @@
                             map.setView(latlng, 17);
                         }
                     }
-
-                }, null, { enableHighAccuracy: true });
+                }, err => {
+                    document.getElementById('sys-status').innerText = "Error GPS. Comprueba permisos.";
+                }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 });
             }
 
+            // --- INICIO PASOS ---
             if ('LinearAccelerationSensor' in window) {
-                sensorPasos = new LinearAccelerationSensor({ frequency: 60 });
-                let lastM = 0;
-                sensorPasos.addEventListener('reading', () => {
-                    let m = Math.sqrt(sensorPasos.x**2 + sensorPasos.y**2 + sensorPasos.z**2);
-                    if (m > 12 && lastM < 12) {
-                        pasos++;
-                        document.getElementById('steps').innerText = pasos;
-                        kcal += 0.04;
-                        document.getElementById('kcal').innerText = Math.floor(kcal);
-                    }
-                    lastM = m;
-                });
-                sensorPasos.start();
+                try {
+                    sensorPasos = new LinearAccelerationSensor({ frequency: 30 });
+                    let lastM = 0;
+                    sensorPasos.addEventListener('reading', () => {
+                        let m = Math.sqrt(sensorPasos.x**2 + sensorPasos.y**2 + sensorPasos.z**2);
+                        
+                        // Sensibilidad a 4 para caminar normal
+                        if (m > 4 && lastM < 4) {
+                            pasos++;
+                            document.getElementById('steps').innerText = pasos;
+                            kcal += 0.04;
+                            document.getElementById('kcal').innerText = Math.floor(kcal);
+                        }
+                        lastM = m;
+                    });
+                    sensorPasos.start();
+                } catch(e) {
+                    document.getElementById('sys-status').style.display = 'block';
+                    document.getElementById('sys-status').innerText = "Sensor de pasos bloqueado por el navegador.";
+                }
+            } else {
+                document.getElementById('sys-status').style.display = 'block';
+                document.getElementById('sys-status').innerText = "Tu navegador no soporta el contador de pasos.";
             }
         }
 
@@ -174,16 +185,19 @@
             activo = false;
             if(watchID) navigator.geolocation.clearWatch(watchID);
             if(sensorPasos) sensorPasos.stop();
-            const registro = {
-                fecha: new Date().toLocaleDateString() + " " + new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-                pasos: pasos,
-                dist: document.getElementById('dist').innerText,
-                kcal: document.getElementById('kcal').innerText
-            };
-            let historial = JSON.parse(localStorage.getItem('fit_hist')) || [];
-            historial.unshift(registro);
-            localStorage.setItem('fit_hist', JSON.stringify(historial.slice(0, 30)));
-            mostrarHistorial();
+            
+            if (pasos > 10 || distancia > 0.01) {
+                const registro = {
+                    fecha: new Date().toLocaleDateString() + " " + new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+                    pasos: pasos,
+                    dist: document.getElementById('dist').innerText,
+                    kcal: document.getElementById('kcal').innerText
+                };
+                let historial = JSON.parse(localStorage.getItem('fit_hist')) || [];
+                historial.unshift(registro);
+                localStorage.setItem('fit_hist', JSON.stringify(historial.slice(0, 30)));
+                mostrarHistorial();
+            }
         }
 
         function mostrarHistorial() {
