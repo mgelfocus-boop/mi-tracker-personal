@@ -161,8 +161,8 @@
                     sensorPasos.addEventListener('reading', () => {
                         let m = Math.sqrt(sensorPasos.x**2 + sensorPasos.y**2 + sensorPasos.z**2);
                         
-                        // Sensibilidad a 4 para caminar normal
-                        if (m > 4 && lastM < 4) {
+                        // Sensibilidad a 8 para caminar normal
+                        if (m > 8 && lastM < 8) {
                             pasos++;
                             document.getElementById('steps').innerText = pasos;
                             kcal += 0.04;
