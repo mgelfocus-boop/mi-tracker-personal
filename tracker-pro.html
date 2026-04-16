@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>MiFit Pro + Anti-Suspensión</title>
+    <title>MiFit Pro + GPS Filtrado</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -25,6 +25,7 @@
         .hist-list { list-style: none; padding: 0; margin: 0; max-height: 200px; overflow-y: auto; }
         .hist-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #1a1a1a; font-size: 0.8rem; }
         .wake-status { font-size: 0.6rem; color: var(--accent); margin-top: 5px; }
+        #gps-status { font-size: 0.7rem; color: #ff9f43; margin-top: 5px; display: none; }
     </style>
 </head>
 <body>
@@ -36,14 +37,15 @@
         <div class="card"><span class="label">Altitud</span><span class="val" id="alt">--</span></div>
         <div class="card"><span class="label">Velocidad</span><span class="val" id="speed">0.0</span><span class="label">km/h</span></div>
         <div class="card"><span class="label">Calorías</span><span class="val" id="kcal">0</span></div>
-        <div class="card full"><span class="label">Distancia</span><span class="val" id="dist">0.00 km</span></div>
+        <div class="card full"><span class="label">Distancia Real</span><span class="val" id="dist">0.00 km</span></div>
     </div>
 
     <div id="map"></div>
 
     <div class="controls">
         <button id="btn" onclick="toggle()">INICIAR ACTIVIDAD</button>
-        <div id="wakeStatus" class="wake-status" style="text-align: center; visibility: hidden;">⚓ Manteniendo sensores activos...</div>
+        <div id="gps-status">Buscando señal GPS de alta precisión...</div>
+        <div id="wakeStatus" class="wake-status" style="visibility: hidden;">⚓ Pantalla activa bloqueada</div>
     </div>
 
     <div class="history">
@@ -53,6 +55,7 @@
     <script>
         let activo = false, pasos = 0, distancia = 0, kcal = 0, watchID, map, path, sensorPasos, wakeLock = null;
         let coordsRuta = [];
+        let primerPuntoFijado = false;
 
         window.onload = () => { initMap(); mostrarHistorial(); };
 
@@ -62,16 +65,23 @@
             path = L.polyline([], {color: '#00ffa3', weight: 4}).addTo(map);
         }
 
-        // FUNCIÓN CLAVE: Bloqueo de suspensión
+        function calcularDistancia(lat1, lon1, lat2, lon2) {
+            const R = 6371; 
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
+        }
+
         async function requestWakeLock() {
             try {
                 if ('wakeLock' in navigator) {
                     wakeLock = await navigator.wakeLock.request('screen');
                     document.getElementById('wakeStatus').style.visibility = 'visible';
                 }
-            } catch (err) {
-                console.log(`Error WakeLock: ${err.name}, ${err.message}`);
-            }
+            } catch (err) { console.log("WakeLock error"); }
         }
 
         function releaseWakeLock() {
@@ -89,33 +99,57 @@
                 activo = true;
                 btn.innerText = "FINALIZAR Y GUARDAR";
                 btn.classList.add('stop');
-                await requestWakeLock(); // Activar bloqueo al empezar
+                document.getElementById('gps-status').style.display = 'block';
+                await requestWakeLock();
                 startTracking();
             } else {
                 detenerYGuardar();
-                releaseWakeLock(); // Liberar bloqueo al terminar
+                releaseWakeLock();
                 btn.innerText = "INICIAR ACTIVIDAD";
                 btn.classList.remove('stop');
+                document.getElementById('gps-status').style.display = 'none';
             }
         }
 
         function startTracking() {
-            pasos = 0; distancia = 0; kcal = 0; coordsRuta = [];
+            pasos = 0; distancia = 0; kcal = 0; coordsRuta = []; primerPuntoFijado = false;
             path.setLatLngs([]);
             
             if (navigator.geolocation) {
                 watchID = navigator.geolocation.watchPosition(pos => {
-                    const { latitude, longitude, speed, altitude } = pos.coords;
+                    const { latitude, longitude, speed, altitude, accuracy } = pos.coords;
                     const latlng = [latitude, longitude];
-                    coordsRuta.push(latlng);
-                    path.setLatLngs(coordsRuta);
-                    map.setView(latlng, 17);
+
                     document.getElementById('speed').innerText = (speed * 3.6 || 0).toFixed(1);
                     if (altitude !== null) document.getElementById('alt').innerText = Math.round(altitude) + "m";
-                    if(coordsRuta.length > 1) {
-                        distancia += 0.005; // Ajuste de distancia simulada
-                        document.getElementById('dist').innerText = distancia.toFixed(2) + " km";
+
+                    // FILTRO DE GPS ESTRICTO: Ignora cualquier lectura con un error mayor a 20 metros
+                    if (accuracy < 20) {
+                        
+                        // Si es la primera lectura buena, la fijamos y quitamos el mensaje de "Buscando..."
+                        if (!primerPuntoFijado) {
+                            primerPuntoFijado = true;
+                            coordsRuta.push(latlng);
+                            path.setLatLngs(coordsRuta);
+                            map.setView(latlng, 17);
+                            document.getElementById('gps-status').style.display = 'none';
+                            return; 
+                        }
+
+                        // Cálculo real entre puntos
+                        let ultimaPos = coordsRuta[coordsRuta.length - 1];
+                        let tramoKm = calcularDistancia(ultimaPos[0], ultimaPos[1], latitude, longitude);
+                        
+                        // FILTRO DE MOVIMIENTO: Más de 3 metros (evita vibraciones) y menos de 100 metros por lectura (evita teletransportes)
+                        if (tramoKm > 0.003 && tramoKm < 0.100) {
+                            distancia += tramoKm;
+                            document.getElementById('dist').innerText = distancia.toFixed(2) + " km";
+                            coordsRuta.push(latlng);
+                            path.setLatLngs(coordsRuta);
+                            map.setView(latlng, 17);
+                        }
                     }
+
                 }, null, { enableHighAccuracy: true });
             }
 
@@ -158,7 +192,7 @@
             lista.innerHTML = historial.map(h => `
                 <li class="hist-item">
                     <span><strong>${h.fecha}</strong></span>
-                    <span>${h.pasos} pasos | ${h.kcal} kcal</span>
+                    <span>${h.pasos} pasos | ${h.kcal} kcal | ${h.dist}</span>
                 </li>
             `).join('');
         }
